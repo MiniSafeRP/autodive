@@ -14,7 +14,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local isMobile = UserInputService.TouchEnabled
 
 local function MobileDebug(...)
     if not isMobile then return end
@@ -861,7 +861,7 @@ local function SimularTouchBotaoMobile(textos, duracao)
     local beginState = Enum.UserInputState.Begin
     local endState = Enum.UserInputState.End
 
-    local ok = pcall(function()
+    local ok, err = pcall(function()
         vim:SendTouchEvent(touchId, beginState, pos.X, pos.Y)
         task.wait(duracao)
         vim:SendTouchEvent(touchId, endState, pos.X, pos.Y)
@@ -882,29 +882,26 @@ local function SimularTouchBotaoMobile(textos, duracao)
         return true
     end
 
-    MobileDebugWarn("Falha no touch:", tostring(botao.Name))
+    MobileDebugWarn("Falha no touch:", tostring(botao.Name), "| erro:", tostring(err))
     return false
 end
 
 -- Mapeia a acao logica do Auto Dive para o nome do GuiButton REAL.
 -- No mobile, o Auto Dive nunca chama keypress/keyrelease.
 local MobileButtonMap = {
-    -- Laterais.
-    -- O primeiro nome encontrado e usado.
-    Q = {"Left", "GK Z"},
-    E = {"Right", "GK C"},
-
-    -- Baixo.
-    Z = {"GK Z2", "GK Z"},
-    C = {"GK C2", "GK C"},
+    -- Mapeamento principal pelos nomes GK encontrados no PlayerGui.
+    Q     = {"GK Z", "Left"},
+    E     = {"GK C2", "Right", "GK C"},
+    Z     = {"GK Z2", "GK Z"},
+    C     = {"GK C", "GK C2"},
 
     -- Defesa frontal.
-    R = {"High Catch", "GK H", "Header"},
-    F = {"Low Catch", "GK"},
+    R     = {"GK H", "High Catch", "Header"},
+    F     = {"GK", "Low Catch", "Reflex"},
 
-    -- Acao de pulo/alta.
+    -- Pulo/defesa alta.
     Space = {"Header", "SideHeader", "BackHeader", "GK H"},
-}
+
 
 
 local function SimularAcaoTouchMobile(kc, duracao)
@@ -1246,11 +1243,34 @@ local function EscolherTeclaAutoDive(hrp, ball, alvoX, alvoY)
     end
 end
 
+local AutoDiveMobileHeartbeatLog = 0
+
 local function AutoDiveUpdate()
-    if not State.AutoDiveAtivado then return end
-    if not State.systemEnabled then return end
-    if os.clock() < (State.GK_BlockUntil or 0) then return end
-    if not hasGKTool() then return end
+    local agoraDebug = os.clock()
+
+    if not State.AutoDiveAtivado then
+        if isMobile and agoraDebug - AutoDiveMobileHeartbeatLog > 2 then
+            AutoDiveMobileHeartbeatLog = agoraDebug
+            MobileDebug("AutoDiveUpdate esta rodando, mas AutoDiveAtivado = false.")
+        end
+        return
+    end
+
+    if not State.systemEnabled then
+        return
+    end
+
+    if agoraDebug < (State.GK_BlockUntil or 0) then
+        return
+    end
+
+    if not hasGKTool() then
+        if isMobile and agoraDebug - AutoDiveMobileHeartbeatLog > 2 then
+            AutoDiveMobileHeartbeatLog = agoraDebug
+            MobileDebug("Auto Dive ativo, mas hasGKTool() = false.")
+        end
+        return
+    end
 
     local hrp = getHRP()
     local hum = getHumanoid()
@@ -1263,6 +1283,10 @@ local function AutoDiveUpdate()
     local bola = getBall()
 
     if not bola or not bola.Parent then
+        if isMobile and agoraDebug - AutoDiveMobileHeartbeatLog > 2 then
+            AutoDiveMobileHeartbeatLog = agoraDebug
+            MobileDebug("Auto Dive ativo, mas nenhuma bola foi encontrada.")
+        end
         State.AutoDiveBallLock = nil
         State.AutoDiveBallLockUntilReset = false
         return
@@ -1271,7 +1295,22 @@ local function AutoDiveUpdate()
     local velWorld = bola.AssemblyLinearVelocity
     local velocidade = velWorld.Magnitude
 
-    if velocidade < 10 then return end
+    if velocidade < 10 then
+        if isMobile and agoraDebug - AutoDiveMobileHeartbeatLog > 2 then
+            AutoDiveMobileHeartbeatLog = agoraDebug
+            MobileDebug("Bola encontrada:", bola:GetFullName(),
+                "| velocidade:", string.format("%.2f", velocidade),
+                "| abaixo do minimo 10.")
+        end
+        return
+    end
+
+    if isMobile and agoraDebug - AutoDiveMobileHeartbeatLog > 2 then
+        AutoDiveMobileHeartbeatLog = agoraDebug
+        MobileDebug("AUTO DIVE MONITORANDO bola:",
+            bola:GetFullName(),
+            "| velocidade:", string.format("%.2f", velocidade))
+    end
 
     if State.AutoDiveBallLockUntilReset then
         local lockLocal = hrp.CFrame:PointToObjectSpace(bola.Position)
@@ -2238,6 +2277,13 @@ end
 CriarBotaoMobile()
 CriarBotaoMobileAutoDive()
 CriarTecladoVirtualMobile()
+
+-- No mobile, o Auto Dive fica ativo por padrao.
+-- O botao DIVE ON/OFF continua podendo desativar/ativar.
+if isMobile then
+    State.AutoDiveAtivado = true
+    MobileDebug("Auto Dive ativado automaticamente no mobile.")
+end
 
 pcall(function() InitWindUI() end)
 
