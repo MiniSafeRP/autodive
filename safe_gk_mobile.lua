@@ -613,290 +613,275 @@ end
 --==================================================================
 -- [AUTO DIVE]
 --==================================================================
+-- MOBILE INPUT / AUTO DIVE
+--
+-- IMPORTANTE:
+-- O teclado virtual abaixo e uma interface manual opcional.
+-- O AUTO DIVE NAO clica nesses botoes.
+--
+-- Quando o Auto Dive detecta a defesa:
+--   bola -> calcula direcao/altura -> simula keypress -> keyrelease
+--
+-- Ordem de backend no MOBILE:
+--   1) keypress/keyrelease (quando fornecidos pelo ambiente)
+--   2) VirtualInput
+--   3) VirtualInputManager
+--
+-- Space tambem passa pelo mesmo caminho de keypress.
+--==================================================================
+
 local AutoDiveVirtualInput = nil
-local MobileButtonCache = {}
-local MobileButtonCacheTime = {}
-local MOBILE_BUTTON_CACHE_TTL = 0.75
 
 local function GetAutoDiveVirtualInput()
     if AutoDiveVirtualInput then return AutoDiveVirtualInput end
+
     pcall(function()
         if UserInputService and type(UserInputService.CreateVirtualInput) == "function" then
             AutoDiveVirtualInput = UserInputService:CreateVirtualInput()
         end
     end)
+
     return AutoDiveVirtualInput
 end
 
-local function NormalizarTextoEntrada(v)
-    local s = string.lower(tostring(v or ""))
-    s = s:gsub("[%s%p]", "")
-    return s
-end
-
-local MobileButtonAliases = {
-    ["q"] = {"q","keyq","gkq","diveq","leftup","esquerdaalta"},
-    ["e"] = {"e","keye","gke","divee","rightup","direitaalta"},
-    ["c"] = {"c","keyc","gkc","divec","rightdown","direitabaixa"},
-    ["z"] = {"z","keyz","gkz","divez","leftdown","esquerdabaixa"},
-    ["r"] = {"r","keyr","gkr","catchr","diveR","defender"},
-    ["f"] = {"f","keyf","gkf","catchf","blockf","defendf"},
-    ["space"] = {"space","jump","pulo","salto","jumptouch","mobilejump"},
-}
-
-local function BotaoCorrespondeAChave(button, keyName)
-    if not button or not button:IsA("GuiButton") then return false end
-    if not button.Visible or not button.Active then return false end
-    keyName = string.lower(keyName)
-    local aliases = MobileButtonAliases[keyName] or {keyName}
-    local candidatos = {
-        NormalizarTextoEntrada(button.Name),
-        NormalizarTextoEntrada(button:GetAttribute("Key")),
-        NormalizarTextoEntrada(button:GetAttribute("KeyCode")),
-        NormalizarTextoEntrada(button:GetAttribute("Action")),
-    }
+local function GetVirtualInputManager()
+    local vim = nil
     pcall(function()
-        if button:IsA("TextButton") then
-            table.insert(candidatos, NormalizarTextoEntrada(button.Text))
-        end
-        local tooltip = button:GetAttribute("Tooltip") or button:GetAttribute("Description")
-        table.insert(candidatos, NormalizarTextoEntrada(tooltip))
+        vim = game:GetService("VirtualInputManager")
     end)
-    for _, candidato in ipairs(candidatos) do
-        if candidato ~= "" then
-            for _, alias in ipairs(aliases) do
-                if candidato == NormalizarTextoEntrada(alias) then
-                    return true
-                end
-            end
-        end
-    end
-    return false
+    return vim
 end
 
-local function EncontrarBotaoMobile(keyName)
-    if not isMobile then return nil end
-    local now = os.clock()
-    local cached = MobileButtonCache[keyName]
-    local cachedAt = MobileButtonCacheTime[keyName] or 0
-    if cached and cached.Parent and (now - cachedAt) < MOBILE_BUTTON_CACHE_TTL then
-        if BotaoCorrespondeAChave(cached, keyName) then return cached end
-    end
-    MobileButtonCache[keyName] = nil
-    MobileButtonCacheTime[keyName] = now
-    local ok, result = pcall(function()
-        for _, obj in ipairs(PlayerGui:GetDescendants()) do
-            local isOurs = false
-            if State.MobileKeyboardGui and obj:IsDescendantOf(State.MobileKeyboardGui) then
-                isOurs = true
-            end
-            if not isOurs and obj:IsA("GuiButton") and BotaoCorrespondeAChave(obj, keyName) then
-                return obj
-            end
-        end
-        return nil
-    end)
-    if ok and result then
-        MobileButtonCache[keyName] = result
-        return result
-    end
-    return nil
+local function NomeTecla(kc)
+    return kc and string.lower(kc.Name) or ""
 end
 
-local function AcionarBotaoMobile(keyName)
-    if not isMobile then return false end
-    local button = EncontrarBotaoMobile(keyName)
-    if not button then return false end
-    local ok = pcall(function() button:Activate() end)
-    if ok then
-        State.MobileLastBackend = "GuiButton:" .. keyName
-        return true
-    end
-    return false
-end
+-- Simula uma tecla no MOBILE sem depender de clicar no teclado GUI.
+local function SimularKeypressMobile(kc, duracao)
+    if not isMobile or not kc then return false end
 
-local function PularMobile()
-    if not isMobile then return false end
-    local hum = getHumanoid()
-    if hum and hum.Health > 0 then
+    duracao = duracao or 0.09
+    local nome = NomeTecla(kc)
+
+    -- 1) keypress/keyrelease:
+    -- e o backend preferencial para o Auto Dive mobile.
+    if type(keypress) == "function" and type(keyrelease) == "function" then
         local ok = pcall(function()
-            hum.Jump = true
-            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+            keypress(nome)
+            task.wait(duracao)
+            keyrelease(nome)
         end)
+
         if ok then
-            State.MobileLastBackend = "HumanoidJump"
+            State.MobileLastBackend = "keypress:" .. nome
             return true
         end
     end
-    return AcionarBotaoMobile("space")
+
+    -- 2) VirtualInput
+    local vi = GetAutoDiveVirtualInput()
+    if vi then
+        local ok = pcall(function()
+            vi:SendKey(true, kc, false)
+            task.wait(duracao)
+            vi:SendKey(false, kc, false)
+        end)
+
+        if ok then
+            State.MobileLastBackend = "VirtualInput:" .. nome
+            return true
+        end
+    end
+
+    -- 3) VirtualInputManager
+    local vim = GetVirtualInputManager()
+    if vim then
+        local ok = pcall(function()
+            vim:SendKeyEvent(true, kc, false, game)
+            task.wait(duracao)
+            vim:SendKeyEvent(false, kc, false, game)
+        end)
+
+        if ok then
+            State.MobileLastBackend = "VirtualInputManager:" .. nome
+            return true
+        end
+    end
+
+    warn("[AUTO DIVE MOBILE] Falha ao simular keypress: " .. nome)
+    return false
+end
+
+-- Combo mobile:
+-- Mantem a primeira tecla pressionada, envia a segunda e depois solta
+-- as duas. Isso e diferente de clicar em dois botoes da GUI.
+local function SimularComboMobile(k1, k2, duracao, intervalo)
+    if not isMobile or not k1 or not k2 then return false end
+
+    duracao = duracao or 0.10
+    intervalo = intervalo or 0.01
+
+    local a = NomeTecla(k1)
+    local b = NomeTecla(k2)
+
+    -- Backend preferencial: keypress/keyrelease.
+    if type(keypress) == "function" and type(keyrelease) == "function" then
+        local ok = pcall(function()
+            keypress(a)
+            task.wait(intervalo)
+            keypress(b)
+            task.wait(duracao)
+            keyrelease(b)
+            keyrelease(a)
+        end)
+
+        if ok then
+            State.MobileLastBackend = "keypress_combo:" .. a .. "+" .. b
+            return true
+        end
+    end
+
+    -- Fallback: VirtualInput
+    local vi = GetAutoDiveVirtualInput()
+    if vi then
+        local ok = pcall(function()
+            vi:SendKey(true, k1, false)
+            task.wait(intervalo)
+            vi:SendKey(true, k2, false)
+            task.wait(duracao)
+            vi:SendKey(false, k2, false)
+            vi:SendKey(false, k1, false)
+        end)
+
+        if ok then
+            State.MobileLastBackend = "VirtualInput_combo:" .. a .. "+" .. b
+            return true
+        end
+    end
+
+    -- Fallback: VirtualInputManager
+    local vim = GetVirtualInputManager()
+    if vim then
+        local ok = pcall(function()
+            vim:SendKeyEvent(true, k1, false, game)
+            task.wait(intervalo)
+            vim:SendKeyEvent(true, k2, false, game)
+            task.wait(duracao)
+            vim:SendKeyEvent(false, k2, false, game)
+            vim:SendKeyEvent(false, k1, false, game)
+        end)
+
+        if ok then
+            State.MobileLastBackend = "VirtualInputManager_combo:" .. a .. "+" .. b
+            return true
+        end
+    end
+
+    warn("[AUTO DIVE MOBILE] Falha combo: " .. a .. "+" .. b)
+    return false
 end
 
 local function ApertarTecla(kc, duracao)
     if not kc then return false end
     duracao = duracao or 0.09
-    local k = string.lower(kc.Name)
 
+    -- MOBILE:
+    -- Nao procura GuiButton e nao chama :Activate().
+    -- O Auto Dive envia diretamente a entrada simulada.
     if isMobile then
-        -- 1) Botao touch do jogo
-        if kc == Enum.KeyCode.Space then
-            if PularMobile() then return true end
-        else
-            if AcionarBotaoMobile(k) then return true end
-        end
-
-        -- 2) VirtualInput (API oficial)
-        local vi = GetAutoDiveVirtualInput()
-        if vi then
-            local ok = pcall(function()
-                vi:SendKey(true, kc, false)
-                task.wait(duracao)
-                vi:SendKey(false, kc, false)
-            end)
-            if ok then
-                State.MobileLastBackend = "VirtualInput"
-                return true
-            end
-        end
-
-        -- 3) VirtualInputManager
-        local vim
-        pcall(function() vim = game:GetService("VirtualInputManager") end)
-        if vim then
-            local ok = pcall(function()
-                vim:SendKeyEvent(true, kc, false, game)
-                task.wait(duracao)
-                vim:SendKeyEvent(false, kc, false, game)
-            end)
-            if ok then
-                State.MobileLastBackend = "VirtualInputManager"
-                return true
-            end
-        end
-
-        -- 4) keypress
-        if type(keypress) == "function" and type(keyrelease) == "function" then
-            local ok = pcall(function()
-                keypress(k)
-                task.wait(duracao)
-                keyrelease(k)
-            end)
-            if ok then
-                State.MobileLastBackend = "keypress"
-                return true
-            end
-        end
-
-        warn("[AUTO DIVE MOBILE] Falha: " .. k)
-        return false
+        return SimularKeypressMobile(kc, duracao)
     end
 
     -- PC
+    local k = NomeTecla(kc)
+
     if type(keypress) == "function" and type(keyrelease) == "function" then
         local ok = pcall(function()
-            keypress(k); task.wait(duracao); keyrelease(k)
+            keypress(k)
+            task.wait(duracao)
+            keyrelease(k)
         end)
         if ok then return true end
     end
+
     local vi = GetAutoDiveVirtualInput()
     if vi then
         local ok = pcall(function()
-            vi:SendKey(true, kc, false); task.wait(duracao); vi:SendKey(false, kc, false)
+            vi:SendKey(true, kc, false)
+            task.wait(duracao)
+            vi:SendKey(false, kc, false)
         end)
         if ok then return true end
     end
-    local vim
-    pcall(function() vim = game:GetService("VirtualInputManager") end)
+
+    local vim = GetVirtualInputManager()
     if vim then
         local ok = pcall(function()
-            vim:SendKeyEvent(true, kc, false, game); task.wait(duracao); vim:SendKeyEvent(false, kc, false, game)
+            vim:SendKeyEvent(true, kc, false, game)
+            task.wait(duracao)
+            vim:SendKeyEvent(false, kc, false, game)
         end)
         if ok then return true end
     end
+
     warn("[AUTO DIVE] Falha: " .. k)
     return false
 end
 
 local function PressionarDuasTeclas(k1, k2, duracao, intervalo)
     if not k1 or not k2 then return false end
+
     duracao = duracao or 0.12
     intervalo = intervalo or 0.015
-    local a = string.lower(k1.Name)
-    local b = string.lower(k2.Name)
 
+    -- MOBILE:
+    -- Nunca usa os botoes do teclado virtual para o Auto Dive.
     if isMobile then
-        local firstOk = false
-        if k1 == Enum.KeyCode.Space then firstOk = PularMobile()
-        else firstOk = AcionarBotaoMobile(a) end
-        task.wait(intervalo)
-        local secondOk = false
-        if k2 == Enum.KeyCode.Space then secondOk = PularMobile()
-        else secondOk = AcionarBotaoMobile(b) end
-
-        local vi = GetAutoDiveVirtualInput()
-        if vi then
-            if not firstOk then
-                pcall(function()
-                    vi:SendKey(true, k1, false); task.wait(intervalo); vi:SendKey(false, k1, false)
-                end)
-                firstOk = true
-            end
-            if not secondOk then
-                pcall(function()
-                    vi:SendKey(true, k2, false); task.wait(intervalo); vi:SendKey(false, k2, false)
-                end)
-                secondOk = true
-            end
-        end
-
-        if firstOk and secondOk then
-            State.MobileLastBackend = "MobileCombo:" .. a .. "+" .. b
-            return true
-        end
-
-        local vim
-        pcall(function() vim = game:GetService("VirtualInputManager") end)
-        if vim then
-            local ok = pcall(function()
-                vim:SendKeyEvent(true, k1, false, game)
-                task.wait(intervalo)
-                vim:SendKeyEvent(true, k2, false, game)
-                task.wait(duracao)
-                vim:SendKeyEvent(false, k2, false, game)
-                vim:SendKeyEvent(false, k1, false, game)
-            end)
-            if ok then return true end
-        end
-        warn("[AUTO DIVE MOBILE] Falha combo " .. a .. "+" .. b)
-        return false
+        return SimularComboMobile(k1, k2, duracao, intervalo)
     end
 
     -- PC
+    local a = NomeTecla(k1)
+    local b = NomeTecla(k2)
+
     if type(keypress) == "function" and type(keyrelease) == "function" then
         local ok = pcall(function()
-            keypress(a); task.wait(intervalo); keypress(b)
-            task.wait(duracao); keyrelease(b); keyrelease(a)
+            keypress(a)
+            task.wait(intervalo)
+            keypress(b)
+            task.wait(duracao)
+            keyrelease(b)
+            keyrelease(a)
         end)
         if ok then return true end
     end
+
     local vi = GetAutoDiveVirtualInput()
     if vi then
         local ok = pcall(function()
-            vi:SendKey(true, k1, false); task.wait(intervalo)
-            vi:SendKey(true, k2, false); task.wait(duracao)
-            vi:SendKey(false, k2, false); vi:SendKey(false, k1, false)
+            vi:SendKey(true, k1, false)
+            task.wait(intervalo)
+            vi:SendKey(true, k2, false)
+            task.wait(duracao)
+            vi:SendKey(false, k2, false)
+            vi:SendKey(false, k1, false)
         end)
         if ok then return true end
     end
-    local vim
-    pcall(function() vim = game:GetService("VirtualInputManager") end)
+
+    local vim = GetVirtualInputManager()
     if vim then
         local ok = pcall(function()
-            vim:SendKeyEvent(true, k1, false, game); task.wait(intervalo)
-            vim:SendKeyEvent(true, k2, false, game); task.wait(duracao)
-            vim:SendKeyEvent(false, k2, false, game); vim:SendKeyEvent(false, k1, false, game)
+            vim:SendKeyEvent(true, k1, false, game)
+            task.wait(intervalo)
+            vim:SendKeyEvent(true, k2, false, game)
+            task.wait(duracao)
+            vim:SendKeyEvent(false, k2, false, game)
+            vim:SendKeyEvent(false, k1, false, game)
         end)
         if ok then return true end
     end
+
     warn("[AUTO DIVE] Falha combo " .. a .. "+" .. b)
     return false
 end
@@ -904,29 +889,37 @@ end
 local function ApertarDefesaFrontal(acao)
     if acao == "BAIXA" then
         return ApertarTecla(State.AutoDiveTeclaFrontalBaixa, 0.08)
+
     elseif acao == "MEDIA" then
         if State.AutoDiveFrontalRMaisF then
             return PressionarDuasTeclas(
                 State.AutoDiveTeclaFrontalMedia,
                 State.AutoDiveTeclaFrontalBaixa,
-                0.10, 0.01
+                0.10,
+                0.01
             )
         end
+
         return ApertarTecla(State.AutoDiveTeclaFrontalMedia, 0.08)
+
     elseif acao == "ALTA" then
         return PressionarDuasTeclas(
             State.AutoDiveTeclaPulo,
             State.AutoDiveTeclaFrontalMedia,
-            0.10, 0.01
+            0.10,
+            0.01
         )
     end
+
     return false
 end
 
 local function CalcularAlturaPrevista(hrp, ball, eta)
     local bolaLocal = hrp.CFrame:PointToObjectSpace(ball.Position)
     local velLocal = hrp.CFrame:VectorToObjectSpace(ball.AssemblyLinearVelocity)
+
     eta = math.clamp(eta or 0, 0, 0.60)
+
     return bolaLocal.Y + velLocal.Y * eta
 end
 
@@ -934,62 +927,104 @@ local function EscolherDefesaFrontal(hrp, ball, etaFrente, lateralPrevista, velo
     if not State.AutoDiveDefesaFrontal then return nil end
     if not hrp or not ball then return nil end
     if lateralPrevista == nil then return nil end
-    if math.abs(lateralPrevista) > State.AutoDiveFrontalLateralMaxima then return nil end
-    if math.abs(velocidadeLateral or 0) > State.AutoDiveFrontalVelocidadeLateralMaxima then return nil end
+
+    if math.abs(lateralPrevista) > State.AutoDiveFrontalLateralMaxima then
+        return nil
+    end
+
+    if math.abs(velocidadeLateral or 0) > State.AutoDiveFrontalVelocidadeLateralMaxima then
+        return nil
+    end
 
     local bolaLocal = hrp.CFrame:PointToObjectSpace(ball.Position)
     local velLocal = hrp.CFrame:VectorToObjectSpace(ball.AssemblyLinearVelocity)
+
     local frente = -bolaLocal.Z
 
     if frente < -5 then return nil end
     if velLocal.Z <= 0.05 then return nil end
 
     local eta = etaFrente
+
     if not eta or eta == math.huge then
         eta = math.max(0, frente / math.max(velLocal.Z, 0.01))
     end
+
     if eta > 0.65 then return nil end
 
     local altura = CalcularAlturaPrevista(hrp, ball, eta)
+
     local lowLimit = State.AutoDiveFrontalAlturaPes
     local head = State.AutoDiveFrontalAlturaCabeca
 
     if altura >= head then
-        if eta <= State.AutoDiveFrontalTempoReacaoAlta then return "ALTA" end
+        if eta <= State.AutoDiveFrontalTempoReacaoAlta then
+            return "ALTA"
+        end
         return nil
     end
+
     if altura <= lowLimit then
-        if eta <= State.AutoDiveFrontalTempoReacaoBaixa then return "BAIXA" end
+        if eta <= State.AutoDiveFrontalTempoReacaoBaixa then
+            return "BAIXA"
+        end
         return nil
     end
-    if eta <= State.AutoDiveFrontalTempoReacaoMedia then return "MEDIA" end
+
+    if eta <= State.AutoDiveFrontalTempoReacaoMedia then
+        return "MEDIA"
+    end
+
     return nil
 end
 
 local function EscolherTeclaAutoDive(hrp, ball, alvoX, alvoY)
     if not hrp or not ball then return nil end
+
     local bolaLocal = hrp.CFrame:PointToObjectSpace(ball.Position)
     local velLocal = hrp.CFrame:VectorToObjectSpace(ball.AssemblyLinearVelocity)
 
     local x = alvoX
-    if x == nil then x = bolaLocal.X + velLocal.X * 0.20 end
+    if x == nil then
+        x = bolaLocal.X + velLocal.X * 0.20
+    end
+
     local direita
-    if math.abs(x) > 0.8 then direita = x > 0
-    elseif math.abs(velLocal.X) > 0.8 then direita = velLocal.X > 0
-    else direita = bolaLocal.X >= 0 end
+
+    if math.abs(x) > 0.8 then
+        direita = x > 0
+    elseif math.abs(velLocal.X) > 0.8 then
+        direita = velLocal.X > 0
+    else
+        direita = bolaLocal.X >= 0
+    end
 
     local altura = alvoY
-    if altura == nil then altura = bolaLocal.Y + velLocal.Y * 0.20 end
-    local alto = altura > State.HEIGHT_THRESHOLD
-    if altura > State.AutoDiveAlturaMuitoAlta then alto = true
-    elseif altura < 0 then alto = false end
 
-    if State.AutoDiveInverterLado then direita = not direita end
+    if altura == nil then
+        altura = bolaLocal.Y + velLocal.Y * 0.20
+    end
+
+    local alto = altura > State.HEIGHT_THRESHOLD
+
+    if altura > State.AutoDiveAlturaMuitoAlta then
+        alto = true
+    elseif altura < 0 then
+        alto = false
+    end
+
+    if State.AutoDiveInverterLado then
+        direita = not direita
+    end
 
     if direita then
-        return alto and State.AutoDiveTeclas.DireitaAlto or State.AutoDiveTeclas.DireitaBaixo
+        return alto
+            and State.AutoDiveTeclas.DireitaAlto
+            or State.AutoDiveTeclas.DireitaBaixo
     else
-        return alto and State.AutoDiveTeclas.EsquerdaAlto or State.AutoDiveTeclas.EsquerdaBaixo
+        return alto
+            and State.AutoDiveTeclas.EsquerdaAlto
+            or State.AutoDiveTeclas.EsquerdaBaixo
     end
 end
 
@@ -1001,10 +1036,14 @@ local function AutoDiveUpdate()
 
     local hrp = getHRP()
     local hum = getHumanoid()
-    if not hrp or not hum or hum.Health <= 0 then return end
+
+    if not hrp or not hum or hum.Health <= 0 then
+        return
+    end
 
     local agora = os.clock()
     local bola = getBall()
+
     if not bola or not bola.Parent then
         State.AutoDiveBallLock = nil
         State.AutoDiveBallLockUntilReset = false
@@ -1013,14 +1052,20 @@ local function AutoDiveUpdate()
 
     local velWorld = bola.AssemblyLinearVelocity
     local velocidade = velWorld.Magnitude
+
     if velocidade < 10 then return end
 
     if State.AutoDiveBallLockUntilReset then
         local lockLocal = hrp.CFrame:PointToObjectSpace(bola.Position)
         local distLock = (bola.Position - hrp.Position).Magnitude
+
         local unlockDist = isMobile and 110 or 85
-        local unlockZ    = isMobile and 30  or 24
-        if velocidade < 6 or distLock > unlockDist or lockLocal.Z > unlockZ then
+        local unlockZ = isMobile and 30 or 24
+
+        if velocidade < 6
+            or distLock > unlockDist
+            or lockLocal.Z > unlockZ then
+
             State.AutoDiveBallLock = nil
             State.AutoDiveBallLockUntilReset = false
         else
@@ -1029,7 +1074,10 @@ local function AutoDiveUpdate()
     end
 
     if State.AutoDiveEnviandoTecla then return end
-    if agora - State.AutoDiveUltimoDive < State.AutoDiveCooldown then return end
+
+    if agora - State.AutoDiveUltimoDive < State.AutoDiveCooldown then
+        return
+    end
 
     local bolaLocal = hrp.CFrame:PointToObjectSpace(bola.Position)
     local velLocal = hrp.CFrame:VectorToObjectSpace(velWorld)
@@ -1041,16 +1089,20 @@ local function AutoDiveUpdate()
     local frente = -z
 
     local horizontalSpeed = math.sqrt(vx * vx + vz * vz)
+
     if horizontalSpeed < 10 then return end
 
     local distXZ = math.sqrt(x * x + z * z)
+
     if distXZ < 0.1 then return end
 
     local aproximacao = -(x * vx + z * vz) / distXZ
+
     if aproximacao < 1.0 then return end
 
     local etaLinha = math.huge
     local xLinha = nil
+
     if vz > 0.05 and frente > -6 then
         etaLinha = math.max(0, -z / vz)
         xLinha = x + vx * etaLinha
@@ -1058,8 +1110,10 @@ local function AutoDiveUpdate()
 
     local etaProximo = math.huge
     local xProximo = nil
+
     local speed2 = vx * vx + vz * vz
     local tProximo = -(x * vx + z * vz) / speed2
+
     if tProximo >= 0 and tProximo <= 2.5 then
         etaProximo = tProximo
         xProximo = x + vx * tProximo
@@ -1067,6 +1121,7 @@ local function AutoDiveUpdate()
 
     local eta = etaLinha
     local xPrevisto = xLinha
+
     if eta == math.huge then
         eta = etaProximo
         xPrevisto = xProximo
@@ -1075,57 +1130,110 @@ local function AutoDiveUpdate()
         xPrevisto = xProximo
     end
 
-    if eta == math.huge or not xPrevisto then return end
+    if eta == math.huge or not xPrevisto then
+        return
+    end
 
     local lateralPrevista = math.abs(xPrevisto)
-    local angulo = math.deg(math.atan2(math.abs(vx), math.max(math.abs(vz), 0.01)))
+
+    local angulo = math.deg(
+        math.atan2(
+            math.abs(vx),
+            math.max(math.abs(vz), 0.01)
+        )
+    )
 
     local alcanceNormal = 34
     local alcanceMuitoAberto = 50
-    local chuteMuitoAberto = lateralPrevista > alcanceNormal
+
+    local chuteMuitoAberto =
+        lateralPrevista > alcanceNormal
         and lateralPrevista <= alcanceMuitoAberto
         and angulo >= 45
         and math.abs(vx) >= 10
         and frente >= 12
 
-    if lateralPrevista > alcanceNormal and not chuteMuitoAberto then return end
-
-    local tipo
-    if lateralPrevista <= 3.25 and angulo <= 22 then tipo = "RETA"
-    elseif lateralPrevista <= 7 and angulo <= 34 then tipo = "DIAGONAL_LEVE"
-    elseif lateralPrevista <= 14 and angulo <= 50 then tipo = "DIAGONAL_MEDIA"
-    else tipo = "DIAGONAL_ABERTA" end
-
-    local reacao
-    if tipo == "RETA" then reacao = 0.30
-    elseif tipo == "DIAGONAL_LEVE" then reacao = 0.34
-    elseif tipo == "DIAGONAL_MEDIA" then
-        reacao = 0.44 + math.clamp((lateralPrevista - 7) / 7, 0, 1) * 0.12
-    else
-        reacao = 0.58 + math.clamp((lateralPrevista - 14) / 20, 0, 1) * 0.34
-        if angulo >= 55 then reacao += 0.10 end
+    if lateralPrevista > alcanceNormal and not chuteMuitoAberto then
+        return
     end
 
-    if chuteMuitoAberto then reacao = math.max(reacao, 0.95) end
+    local tipo
 
-    if frente <= 5 then reacao = math.min(reacao, 0.14)
-    elseif frente <= 9 then reacao = math.min(reacao, 0.20)
-    elseif frente <= 14 then reacao = math.min(reacao, 0.28)
-    elseif frente <= 20 and not chuteMuitoAberto then reacao = math.min(reacao, 0.38)
-    elseif frente <= 26 and tipo ~= "DIAGONAL_ABERTA" then reacao = math.min(reacao, 0.45) end
+    if lateralPrevista <= 3.25 and angulo <= 22 then
+        tipo = "RETA"
+    elseif lateralPrevista <= 7 and angulo <= 34 then
+        tipo = "DIAGONAL_LEVE"
+    elseif lateralPrevista <= 14 and angulo <= 50 then
+        tipo = "DIAGONAL_MEDIA"
+    else
+        tipo = "DIAGONAL_ABERTA"
+    end
 
-    if eta > 2.50 or eta > reacao then return end
+    local reacao
+
+    if tipo == "RETA" then
+        reacao = 0.30
+
+    elseif tipo == "DIAGONAL_LEVE" then
+        reacao = 0.34
+
+    elseif tipo == "DIAGONAL_MEDIA" then
+        reacao = 0.44
+            + math.clamp((lateralPrevista - 7) / 7, 0, 1) * 0.12
+
+    else
+        reacao = 0.58
+            + math.clamp((lateralPrevista - 14) / 20, 0, 1) * 0.34
+
+        if angulo >= 55 then
+            reacao += 0.10
+        end
+    end
+
+    if chuteMuitoAberto then
+        reacao = math.max(reacao, 0.95)
+    end
+
+    if frente <= 5 then
+        reacao = math.min(reacao, 0.14)
+    elseif frente <= 9 then
+        reacao = math.min(reacao, 0.20)
+    elseif frente <= 14 then
+        reacao = math.min(reacao, 0.28)
+    elseif frente <= 20 and not chuteMuitoAberto then
+        reacao = math.min(reacao, 0.38)
+    elseif frente <= 26 and tipo ~= "DIAGONAL_ABERTA" then
+        reacao = math.min(reacao, 0.45)
+    end
+
+    if eta > 2.50 or eta > reacao then
+        return
+    end
 
     local etaAcao = math.clamp(eta, 0, 0.60)
-    local alturaPrevista = bolaLocal.Y + velLocal.Y * etaAcao
-    local xAcao = x + vx * etaAcao
+
+    local alturaPrevista =
+        bolaLocal.Y + velLocal.Y * etaAcao
+
+    local xAcao =
+        x + vx * etaAcao
 
     if math.abs(xPrevisto) <= 3.25 and angulo <= 35 then
-        local defesa = EscolherDefesaFrontal(hrp, bola, etaLinha, xPrevisto, math.abs(vx))
+        local defesa = EscolherDefesaFrontal(
+            hrp,
+            bola,
+            etaLinha,
+            xPrevisto,
+            math.abs(vx)
+        )
+
         if defesa then
             State.AutoDiveEnviandoTecla = true
+
             local enviado = ApertarDefesaFrontal(defesa)
+
             State.AutoDiveEnviandoTecla = false
+
             if enviado then
                 State.AutoDiveUltimoDive = agora
                 State.AutoDiveBallLock = bola
@@ -1138,19 +1246,33 @@ local function AutoDiveUpdate()
         end
     end
 
-    local tecla = EscolherTeclaAutoDive(hrp, bola, xAcao, alturaPrevista)
+    local tecla = EscolherTeclaAutoDive(
+        hrp,
+        bola,
+        xAcao,
+        alturaPrevista
+    )
+
     if not tecla then return end
 
     State.AutoDiveEnviandoTecla = true
+
+    -- AQUI acontece o auto dive:
+    -- nenhuma tecla virtual da GUI e clicada.
+    -- A tecla e simulada diretamente.
     local enviado = ApertarTecla(tecla, 0.09)
+
     State.AutoDiveEnviandoTecla = false
+
     if enviado then
         State.AutoDiveUltimoDive = agora
         State.AutoDiveBallLock = bola
         State.AutoDiveBallLockUntilReset = true
         State.AutoDiveUltimaAcao = tecla.Name
     else
-        State.AutoDiveUltimoDive = agora - State.AutoDiveCooldown * 0.5
+        State.AutoDiveUltimoDive =
+            agora - State.AutoDiveCooldown * 0.5
+
         State.AutoDiveBallLockUntilReset = false
     end
 end
@@ -1668,15 +1790,38 @@ function InitWindUI()
             if type(CriarTecladoVirtualMobile) == 'function' then
                 CriarTecladoVirtualMobile()
             end
-            if State.MobileKeyboardGui then State.MobileKeyboardGui.Enabled = v end
+
+            if State.MobileKeyboardGui then
+                State.MobileKeyboardGui.Enabled = v
+            end
+
+            -- Ativar o teclado virtual no mobile tambem ativa
+            -- o Auto Dive. O Auto Dive usa keypress diretamente;
+            -- os botoes abaixo continuam sendo apenas controles manuais.
+            if isMobile then
+                State.AutoDiveAtivado = v
+                State.AutoDiveBallLock = nil
+                State.AutoDiveBallLockUntilReset = false
+            end
         end,
     })
     MobileTab:Button({
         Title='Criar / mostrar teclado',
         Icon='keyboard',
         Callback=function()
-            if type(CriarTecladoVirtualMobile) == 'function' then CriarTecladoVirtualMobile() end
-            if State.MobileKeyboardGui then State.MobileKeyboardGui.Enabled = true end
+            if type(CriarTecladoVirtualMobile) == 'function' then
+                CriarTecladoVirtualMobile()
+            end
+
+            if State.MobileKeyboardGui then
+                State.MobileKeyboardGui.Enabled = true
+            end
+
+            if isMobile then
+                State.AutoDiveAtivado = true
+                State.AutoDiveBallLock = nil
+                State.AutoDiveBallLockUntilReset = false
+            end
         end,
     })
     MobileTab:Button({Title='Ver metodo de input', Callback=function()
@@ -1803,6 +1948,7 @@ function CriarTecladoVirtualMobile()
         lbl.Parent = btn
 
         btn.Activated:Connect(function()
+            -- Uso manual: este botao chama o mesmo backend de keypress.
             ApertarTecla(item[3], 0.08)
         end)
     end
@@ -1854,3 +2000,5 @@ pcall(function() InitWindUI() end)
 
 print("[INIT] ✅ Safe GK Mobile carregado")
 print("[INIT] Mobile:", isMobile and "SIM" or "NÃO")
+
+print("V2 CARREGADA")
