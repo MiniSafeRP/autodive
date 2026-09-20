@@ -14,7 +14,16 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 local Camera      = Workspace.CurrentCamera
 
-local isMobile = UserInputService.TouchEnabled
+local FORCE_MOBILE_TEST = false
+local isMobile = UserInputService.TouchEnabled or FORCE_MOBILE_TEST
+
+print("[SAFE GK DEBUG] SCRIPT INICIOU")
+
+print("[SAFE GK DEBUG] TouchEnabled:", UserInputService.TouchEnabled)
+print("[SAFE GK DEBUG] KeyboardEnabled:", UserInputService.KeyboardEnabled)
+print("[SAFE GK DEBUG] MouseEnabled:", UserInputService.MouseEnabled)
+print("[SAFE GK DEBUG] Mobile:", isMobile)
+print("[SAFE GK DEBUG] ForceMobileTest:", FORCE_MOBILE_TEST)
 
 local function MobileDebug(...)
     if not isMobile then return end
@@ -901,8 +910,7 @@ local MobileButtonMap = {
 
     -- Pulo/defesa alta.
     Space = {"Header", "SideHeader", "BackHeader", "GK H"},
-
-
+}
 
 local function SimularAcaoTouchMobile(kc, duracao)
     if not isMobile or not kc then return false end
