@@ -742,8 +742,6 @@ local function NomeGuiNormalizado(s)
 end
 
 local function EncontrarBotaoGKMobile(nomes)
-    -- SOMENTE MOBILE.
-    -- No PC nao procura os controles mobile.
     if not isMobile then
         return nil
     end
@@ -753,12 +751,10 @@ local function EncontrarBotaoGKMobile(nomes)
         return nil
     end
 
-    MobileDebug("Procurando botao GK em TODO PlayerGui:", table.concat(nomes, " / "))
+    MobileDebug("Procurando controle GK em TODO PlayerGui:",
+        table.concat(nomes, " / "))
 
-    -- Procura em TODO o PlayerGui.
-    -- Nao depende de Start, ImageLabel ou qualquer caminho fixo.
     local procurados = {}
-
     for _, nome in ipairs(nomes) do
         procurados[NomeGuiNormalizado(nome)] = true
     end
@@ -766,39 +762,76 @@ local function EncontrarBotaoGKMobile(nomes)
     local candidatos = {}
 
     for _, obj in ipairs(PlayerGui:GetDescendants()) do
-        if obj:IsA("GuiButton")
+        if obj:IsA("GuiObject")
             and obj.Visible
-            and GKMobileButtonNames[obj.Name] then
+            and GKMobileButtonNames[obj.Name]
+            and procurados[NomeGuiNormalizado(obj.Name)]
+            and obj.AbsoluteSize.X > 0
+            and obj.AbsoluteSize.Y > 0 then
 
-            local normalizado = NomeGuiNormalizado(obj.Name)
+            local alvo = obj
 
-            if procurados[normalizado] then
-                table.insert(candidatos, obj)
-                MobileDebug("Candidato encontrado:", obj:GetFullName(),
-                    "| Pos:", obj.AbsolutePosition,
-                    "| Size:", obj.AbsoluteSize)
+            -- Se o objeto nomeado for um TextLabel/ImageLabel,
+            -- tenta achar o GuiButton interativo mais proximo.
+            if not obj:IsA("GuiButton") then
+                local parent = obj.Parent
+                while parent and parent ~= PlayerGui do
+                    if parent:IsA("GuiButton") and parent.Visible then
+                        alvo = parent
+                        break
+                    end
+                    parent = parent.Parent
+                end
+            end
+
+            table.insert(candidatos, alvo)
+
+            MobileDebug(
+                "Candidato:",
+                obj:GetFullName(),
+                "| classe:", obj.ClassName,
+                "| alvo touch:", alvo:GetFullName(),
+                "| Pos:", alvo.AbsolutePosition,
+                "| Size:", alvo.AbsoluteSize
+            )
+        end
+    end
+
+    -- Evita duplicatas e prioriza GuiButton real.
+    local vistos = {}
+    local primeiro = nil
+
+    for _, botao in ipairs(candidatos) do
+        if not vistos[botao] then
+            vistos[botao] = true
+            primeiro = primeiro or botao
+
+            if botao:IsA("GuiButton") then
+                MobileDebug("Botao interativo selecionado:",
+                    botao:GetFullName())
+                return botao
             end
         end
     end
 
-    for _, botao in ipairs(candidatos) do
-        if botao.AbsoluteSize.X > 0 and botao.AbsoluteSize.Y > 0 then
-            MobileDebug("Botao selecionado:", botao:GetFullName())
-            return botao
-        end
+    if primeiro then
+        MobileDebugWarn(
+            "Encontrei o controle, mas ele nao e GuiButton:",
+            primeiro:GetFullName(),
+            "| classe:", primeiro.ClassName
+        )
+        return primeiro
     end
 
-    if candidatos[1] then
-        MobileDebug("Botao selecionado (fallback):", candidatos[1]:GetFullName())
-    else
-        MobileDebugWarn("Nenhum botao GK encontrado para:", table.concat(nomes, " / "))
-    end
+    MobileDebugWarn(
+        "Nenhum controle GK encontrado em PlayerGui para:",
+        table.concat(nomes, " / ")
+    )
 
-    return candidatos[1]
+    return nil
 end
 
--- Lista somente os botoes GK que existem atualmente no PlayerGui.
--- Funciona apenas no mobile; no PC nao faz nada.
+
 local function ListarBotoesGKMobile()
     if not isMobile or not PlayerGui then
         return {}
@@ -1258,6 +1291,7 @@ local function EscolherTeclaAutoDive(hrp, ball, alvoX, alvoY)
 end
 
 local AutoDiveMobileHeartbeatLog = 0
+local AutoDiveGateDebugLog = 0
 
 local function AutoDiveUpdate()
     local agoraDebug = os.clock()
@@ -1299,6 +1333,10 @@ local function AutoDiveUpdate()
     local hum = getHumanoid()
 
     if not hrp or not hum or hum.Health <= 0 then
+        if isMobile and agoraDebug - AutoDiveGateDebugLog > 2 then
+            AutoDiveGateDebugLog = agoraDebug
+            MobileDebug("STOP: personagem/HRP/Humanoid invalido.")
+        end
         return
     end
 
@@ -1411,6 +1449,10 @@ local function AutoDiveUpdate()
     end
 
     if eta == math.huge or not xPrevisto then
+        if isMobile and agoraDebug - AutoDiveGateDebugLog > 2 then
+            AutoDiveGateDebugLog = agoraDebug
+            MobileDebug("STOP: nao conseguiu prever a linha da bola.")
+        end
         return
     end
 
@@ -1434,6 +1476,14 @@ local function AutoDiveUpdate()
         and frente >= 12
 
     if lateralPrevista > alcanceNormal and not chuteMuitoAberto then
+        if isMobile and agoraDebug - AutoDiveGateDebugLog > 2 then
+            AutoDiveGateDebugLog = agoraDebug
+            MobileDebug(
+                "STOP: lateral fora do alcance.",
+                "| lateral:", string.format("%.2f", lateralPrevista),
+                "| alcance:", alcanceNormal
+            )
+        end
         return
     end
 
@@ -1487,6 +1537,15 @@ local function AutoDiveUpdate()
     end
 
     if eta > 2.50 or eta > reacao then
+        if isMobile and agoraDebug - AutoDiveGateDebugLog > 2 then
+            AutoDiveGateDebugLog = agoraDebug
+            MobileDebug(
+                "STOP: ainda nao e hora do dive.",
+                "| eta:", string.format("%.2f", eta),
+                "| reacao:", string.format("%.2f", reacao),
+                "| lateral:", string.format("%.2f", lateralPrevista)
+            )
+        end
         return
     end
 
@@ -1533,7 +1592,24 @@ local function AutoDiveUpdate()
         alturaPrevista
     )
 
-    if not tecla then return end
+    if not tecla then
+        if isMobile and agoraDebug - AutoDiveGateDebugLog > 2 then
+            AutoDiveGateDebugLog = agoraDebug
+            MobileDebug("STOP: EscolherTeclaAutoDive retornou nil.")
+        end
+        return
+    end
+
+    if isMobile and agoraDebug - AutoDiveGateDebugLog > 2 then
+        AutoDiveGateDebugLog = agoraDebug
+        MobileDebug(
+            "DIVE DECIDIDO:",
+            tostring(tecla.Name),
+            "| eta:", string.format("%.2f", eta),
+            "| lateral:", string.format("%.2f", lateralPrevista),
+            "| altura:", string.format("%.2f", alturaPrevista)
+        )
+    end
 
     State.AutoDiveEnviandoTecla = true
 
@@ -1554,6 +1630,10 @@ local function AutoDiveUpdate()
         State.AutoDiveBallLockUntilReset = true
         State.AutoDiveUltimaAcao = tecla.Name
     else
+        if isMobile then
+            MobileDebugWarn("DIVE DECIDIDO, mas o TOUCH falhou para:", tostring(tecla.Name))
+        end
+
         State.AutoDiveUltimoDive =
             agora - State.AutoDiveCooldown * 0.5
 
@@ -1707,10 +1787,11 @@ if isMobile then
         while task.wait(0.15) do
             if State.systemEnabled
                and State.hitboxEnabled
-               and hasGKTool()
                and not State.armed then
+                -- Mobile nao usa GK Tool.
                 State.armed = true
                 State.gkLastKeyTime = os.clock()
+                MobileDebug("Mobile auto-arm: armed = true (sem GK Tool).")
             end
         end
     end)
@@ -1728,7 +1809,7 @@ RunService.Heartbeat:Connect(function()
     if not State.hitboxEnabled then return end
     if not State.systemEnabled then return end
     if not State.armed then return end
-    if not hasGKTool() then return end
+    if not isMobile and not hasGKTool() then return end
 
     local part = State.hitbox
     if not part or not part.Parent then return end
@@ -1754,7 +1835,7 @@ RunService.RenderStepped:Connect(function()
     local hrp = getHRP()
     if not hrp then return end
     local part = State.hitbox or createHitbox()
-    if hasGKTool() and State.systemEnabled then
+    if (isMobile or hasGKTool()) and State.systemEnabled then
         if part.Transparency ~= 0.7 then
             part.Transparency = 0.7
             part.CanTouch = true
