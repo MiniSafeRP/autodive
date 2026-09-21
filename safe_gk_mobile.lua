@@ -807,7 +807,7 @@ local function EncontrarBotaoGKMobile(nomes)
             primeiro = primeiro or botao
 
             if botao:IsA("GuiButton") then
-                MobileDebug("Botao interativo selecionado:",
+                MobileDebug("Botao interativo selecionado (TextButton/ImageButton):",
                     botao:GetFullName())
                 return botao
             end
@@ -890,8 +890,15 @@ local function SimularTouchBotaoMobile(textos, duracao)
     end
 
     if not botao.Parent or not botao.Visible then
+        MobileDebugWarn("Botao encontrado, mas invisivel/sem Parent:", botao:GetFullName())
         return false
     end
+
+    -- GuiButton inclui TextButton e ImageButton.
+    local ehGuiButton = botao:IsA("GuiButton")
+    MobileDebug("Controle selecionado:", botao:GetFullName(),
+        "| classe:", botao.ClassName,
+        "| GuiButton:", ehGuiButton and "SIM" or "NAO")
 
     local pos = CentroDoBotao(botao)
     local touchId = ProximoTouchId()
@@ -902,12 +909,14 @@ local function SimularTouchBotaoMobile(textos, duracao)
         return false
     end
 
-    MobileDebug("VIM encontrado. Enviando Touch Begin em:",
+    MobileDebug("VIM encontrado. Enviando Touch Begin:",
         botao.Name, "|", math.floor(pos.X), math.floor(pos.Y))
 
-    -- UserInputState.Begin / End correspondem ao dedo entrando/saindo.
-    local beginState = Enum.UserInputState.Begin
-    local endState = Enum.UserInputState.End
+    -- IMPORTANTE: SendTouchEvent espera state como int.
+    -- Passar Enum.UserInputState.Begin diretamente causa:
+    -- "Unable to cast UserInputState to int".
+    local beginState = Enum.UserInputState.Begin.Value
+    local endState = Enum.UserInputState.End.Value
 
     local ok, err = pcall(function()
         vim:SendTouchEvent(touchId, beginState, pos.X, pos.Y)
@@ -916,13 +925,13 @@ local function SimularTouchBotaoMobile(textos, duracao)
     end)
 
     if ok then
-        MobileDebug("Touch Begin/End enviado com sucesso:",
-            botao.Name, "|", math.floor(pos.X), math.floor(pos.Y))
+        MobileDebug("TOUCH OK:", botao.Name,
+            "|", math.floor(pos.X), math.floor(pos.Y))
 
         State.MobileLastBackend =
             string.format(
                 "touch:%s @ %.0f,%.0f",
-                botao.Text,
+                tostring(botao.Name),
                 pos.X,
                 pos.Y
             )
@@ -930,9 +939,179 @@ local function SimularTouchBotaoMobile(textos, duracao)
         return true
     end
 
-    MobileDebugWarn("Falha no touch:", tostring(botao.Name), "| erro:", tostring(err))
+    MobileDebugWarn(
+        "Falha no SendTouchEvent:",
+        tostring(botao.Name),
+        "| erro:", tostring(err)
+    )
+
+    -- Fallback somente para GuiButton.
+    -- Continua sem keypress/keyrelease no mobile.
+    if ehGuiButton then
+        local activated, activateErr = pcall(function()
+            botao:Activate()
+        end)
+
+        if activated then
+            MobileDebug("GuiButton:Activate() OK:", botao:GetFullName())
+            State.MobileLastBackend = "GuiButton:Activate:" .. tostring(botao.Name)
+            return true
+        else
+            MobileDebugWarn(
+                "GuiButton:Activate() tambem falhou:",
+                tostring(activateErr)
+            )
+        end
+    end
+
     return false
 end
+
+
+-- Encontra especificamente o primeiro GKSwitch no PlayerGui.
+-- Prioridade:
+--   1) GuiButton chamado GKSwitch dentro de Start/ImageLabel
+--   2) qualquer GuiButton chamado GKSwitch
+--   3) um objeto GKSwitch que tenha um GuiButton filho
+local function EncontrarGKSwitchMobile()
+    if not isMobile or not PlayerGui then
+        return nil
+    end
+
+    local candidatos = {}
+
+    for _, obj in ipairs(PlayerGui:GetDescendants()) do
+        if NomeGuiNormalizado(obj.Name) == "gkswitch" then
+            local alvo = nil
+
+            if obj:IsA("GuiButton") then
+                alvo = obj
+            else
+                for _, child in ipairs(obj:GetDescendants()) do
+                    if child:IsA("GuiButton")
+                        and child.Visible
+                        and NomeGuiNormalizado(child.Name) == "gkswitch" then
+                        alvo = child
+                        break
+                    end
+                end
+
+                if not alvo then
+                    local parent = obj.Parent
+                    while parent and parent ~= PlayerGui do
+                        if parent:IsA("GuiButton") and parent.Visible then
+                            alvo = parent
+                            break
+                        end
+                        parent = parent.Parent
+                    end
+                end
+            end
+
+            if alvo and alvo.Visible then
+                local caminho = string.lower(alvo:GetFullName())
+                local prioridade = 3
+
+                if string.find(caminho, "start", 1, true)
+                    and string.find(caminho, "imagelabel", 1, true) then
+                    prioridade = 1
+                elseif alvo:IsA("GuiButton") then
+                    prioridade = 2
+                end
+
+                table.insert(candidatos, {
+                    botao = alvo,
+                    prioridade = prioridade
+                })
+            end
+        end
+    end
+
+    table.sort(candidatos, function(a, b)
+        return a.prioridade < b.prioridade
+    end)
+
+    if candidatos[1] then
+        local b = candidatos[1].botao
+        MobileDebug(
+            "GKSwitch encontrado:",
+            b:GetFullName(),
+            "| classe:", b.ClassName,
+            "| Pos:", b.AbsolutePosition,
+            "| Size:", b.AbsoluteSize
+        )
+        return b
+    end
+
+    MobileDebugWarn(
+        "GKSwitch nao encontrado em PlayerGui. Procurei em todos os descendentes."
+    )
+    return nil
+end
+
+local MobileGKModeAtivado = false
+
+local function AtivarModoGKMobile()
+    if not isMobile then
+        return true
+    end
+
+    if MobileGKModeAtivado then
+        return true
+    end
+
+    local switch = EncontrarGKSwitchMobile()
+    if not switch then
+        return false
+    end
+
+    MobileDebug("Ativando modo GK pelo GKSwitch:", switch:GetFullName())
+
+    local pos = CentroDoBotao(switch)
+    local touchId = ProximoTouchId()
+    local vim = GetVirtualInputManagerTouch()
+
+    if not vim then
+        MobileDebugWarn("VIM indisponivel para GKSwitch.")
+        return false
+    end
+
+    local beginState = Enum.UserInputState.Begin.Value
+    local endState = Enum.UserInputState.End.Value
+
+    local ok, err = pcall(function()
+        vim:SendTouchEvent(touchId, beginState, pos.X, pos.Y)
+        task.wait(0.12)
+        vim:SendTouchEvent(touchId, endState, pos.X, pos.Y)
+    end)
+
+    if ok then
+        MobileGKModeAtivado = true
+        MobileDebug("GKSwitch ativado por TOUCH:", switch:GetFullName())
+        return true
+    end
+
+    MobileDebugWarn("Falha no TOUCH do GKSwitch:", tostring(err))
+
+    -- Fallback para TextButton/ImageButton.
+    if switch:IsA("GuiButton") then
+        local activated, activateErr = pcall(function()
+            switch:Activate()
+        end)
+
+        if activated then
+            MobileGKModeAtivado = true
+            MobileDebug("GKSwitch ativado via GuiButton:Activate():",
+                switch:GetFullName())
+            return true
+        end
+
+        MobileDebugWarn("GKSwitch Activate falhou:", tostring(activateErr))
+    end
+
+    return false
+end
+
 
 -- Mapeia a acao logica do Auto Dive para o nome do GuiButton REAL.
 -- No mobile, o Auto Dive nunca chama keypress/keyrelease.
@@ -954,6 +1133,11 @@ local MobileButtonMap = {
 local function SimularAcaoTouchMobile(kc, duracao)
     if not isMobile or not kc then return false end
 
+    if not AtivarModoGKMobile() then
+        MobileDebugWarn("Auto Dive aguardando GKSwitch: modo GK ainda nao foi ativado.")
+        return false
+    end
+
     local nome = tostring(kc.Name)
     MobileDebug("Auto Dive escolheu acao mobile:", nome)
     local textos = MobileButtonMap[nome]
@@ -971,6 +1155,11 @@ end
 
 local function SimularComboMobile(k1, k2, duracao, intervalo)
     if not isMobile or not k1 or not k2 then return false end
+
+    if not AtivarModoGKMobile() then
+        MobileDebugWarn("Combo mobile aguardando GKSwitch.")
+        return false
+    end
 
     MobileDebug("Auto Dive combo mobile:",
         tostring(k1.Name), "+", tostring(k2.Name))
@@ -1011,8 +1200,8 @@ local function SimularComboMobile(k1, k2, duracao, intervalo)
     local id1 = ProximoTouchId()
     local id2 = ProximoTouchId()
 
-    local beginState = Enum.UserInputState.Begin
-    local endState = Enum.UserInputState.End
+    local beginState = Enum.UserInputState.Begin.Value
+    local endState = Enum.UserInputState.End.Value
 
     -- Dois dedos: o primeiro toca, depois o segundo toca,
     -- ambos ficam pressionados durante o intervalo e depois saem.
@@ -2387,6 +2576,26 @@ CriarTecladoVirtualMobile()
 if isMobile then
     State.AutoDiveAtivado = true
     MobileDebug("Auto Dive ativado automaticamente no mobile.")
+end
+
+if isMobile then
+    task.spawn(function()
+        for tentativa = 1, 20 do
+            if MobileGKModeAtivado then
+                break
+            end
+
+            if AtivarModoGKMobile() then
+                break
+            end
+
+            task.wait(0.25)
+        end
+
+        if not MobileGKModeAtivado then
+            MobileDebugWarn("Tentativa inicial de ativar GKSwitch terminou sem encontrar o botao.")
+        end
+    end)
 end
 
 pcall(function() InitWindUI() end)
